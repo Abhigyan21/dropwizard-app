@@ -1,0 +1,88 @@
+on: [push]
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+
+      - uses: actions/checkout@master
+
+      - uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Create ACR
+        id: create-acr
+        run: |
+          az acr create -n demorepository -g demorepository9714-rg --location "East US" --sku Standard --admin-enabled
+          echo "::set-output name=acr_username::`az acr credential show -n demorepository --query username | xargs`"
+          echo "::set-output name=acr_password::`az acr credential show -n demorepository --query passwords[0].value | xargs`"
+          echo "::add-mask::`az acr credential show -n demorepository --query passwords[0].value | xargs`"
+
+      - uses: azure/docker-login@v1
+        with:
+          login-server: demorepository.azurecr.io
+          username: ${{ steps.create-acr.outputs.acr_username }}
+          password: ${{ steps.create-acr.outputs.acr_password }}
+
+      - name: Set up JDK 9
+        uses: actions/setup-java@v2
+        with:
+          java-version: '9'
+          distribution: 'adopt'
+      - name: Cache Maven packages
+        uses: actions/cache@v2
+        with:
+          path: ~/.m2
+          key: '${{ runner.os }}-m2-${{ hashFiles(''**/pom.xml'') }}'
+          restore-keys: '${{ runner.os }}-m2'
+
+      - name: Build with Maven
+        run: |
+          mvn --batch-mode --update-snapshots verify
+
+      - name: Build and push image to ACR
+        id: build-image
+        run: |
+          docker build "$GITHUB_WORKSPACE/" -f  "Dockerfile" -t demorepository.azurecr.io/dropwizard-app:latest --label dockerfile-path=Dockerfile
+          docker push demorepository.azurecr.io/dropwizard-app:latest
+
+      - uses: azure/k8s-set-context@v1
+        id: login
+        with:
+          kubeconfig: ${{ secrets.aks_kubernetescluster_kubeConfig }}
+
+      - name: Create namespace
+        run: |
+          namespacePresent=`kubectl get namespace | grep default | wc -l`
+          if [ $namespacePresent -eq 0 ]
+          then
+              echo `kubectl create namespace default`
+          fi
+
+      - uses: azure/k8s-create-secret@v1
+        with:
+          namespace: default
+          container-registry-url: demorepository.azurecr.io
+          container-registry-username: ${{ steps.create-acr.outputs.acr_username }}
+          container-registry-password: ${{ steps.create-acr.outputs.acr_password }}
+          secret-name: kubernetescldockerauth
+
+      - uses: azure/k8s-deploy@v1.2
+        with:
+          namespace: default
+          manifests: |
+            kubernetes/dropwizard-app.yml
+          images: |
+            demorepository.azurecr.io/dropwizard-app:latest
+          imagepullsecrets: |
+            kubernetescldockerauth
+
+      - uses: azure/setup-kubectl@v1
+        with:
+          version: 'v1.19.0'
+        id: install
+
+      - name: Restart deployment
+        run: |
+          az account set --subscription ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          kubectl rollout restart deployment dropwizard-app-deployment
