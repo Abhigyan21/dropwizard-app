@@ -1,0 +1,5 @@
+com/abhigyan/repository/BrandRepository.class
+com/abhigyan/DropwizardDemoApp.class
+com/abhigyan/model/Brand.class
+com/abhigyan/config/BasicConfiguration.class
+com/abhigyan/resource/BrandResource.class
